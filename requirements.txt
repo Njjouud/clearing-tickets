@@ -1,0 +1,19 @@
+# Based on imports actually seen across bulk_clearing_tickets.py,
+# services/*.py, and the original notebook cells. If you already have a
+# requirements.txt with more packages in it (from utils/cleansing_utils.py,
+# utils/datetime_utils.py, utils/excel_tickets.py, or
+# dag_pipeline/write_service_work.py -- none of which I've seen the
+# contents of), merge this into that one rather than overwriting it.
+
+pandas
+mysql-connector-python
+openai
+openpyxl
+pytz
+
+# NOTE: airflow imports (MySqlHook, Variable) appear in services/product_services.py
+# and services/llm_fallback_issues.py, but only run inside try/except
+# fallback paths used in the real Airflow DAG deployment -- NOT needed for
+# local/notebook runs (which use set_query_runner() instead). Do not add
+# apache-airflow here unless you're setting up the actual Airflow
+# environment, since it's a heavy, environment-specific install.
