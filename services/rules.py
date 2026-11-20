@@ -7,6 +7,7 @@ if str(_ROOT) not in sys.path:
 
 import os
 import re
+from functools import lru_cache
 
 import pandas as pd
 from utils.datetime_utils import check_last_24h
@@ -23,6 +24,13 @@ def _dbg(*args, **kwargs):
 
 
 def load_static_rules(product: str):
+    """Rules are static, so the DataFrame is built once per process and reused.
+    Callers only read it (match_rule sorts into a copy, cards uses .loc)."""
+    return _load_static_rules_cached(product)
+
+
+@lru_cache(maxsize=None)
+def _load_static_rules_cached(product: str):
     if product == "rmt":
         return _load_rmt_rules()
     

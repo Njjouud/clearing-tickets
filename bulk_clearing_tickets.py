@@ -18,6 +18,8 @@ Trigger params (or dag_run.conf):
   limit, lookback_days, product ("cards" / "rmt" / "" for all), include_resolved,
   sr_number  -> reprocess one ticket by SrNumber (bypasses filters, overwrites
                 its previous result in both tables)
+  max_workers -> tickets processed concurrently in process_tickets (default 8;
+                 1 = the old one-at-a-time behaviour). Results keep extract order.
 """
 
 from __future__ import annotations
@@ -25,6 +27,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -158,11 +162,42 @@ def _get_connection():
     return MySqlHook(mysql_conn_id=MYSQL_CONN_ID).get_conn()
 
 
-def run_query(query: str, params: dict | None = None) -> list[dict]:
-    params = params or {}
-    for key, value in params.items():
-        query = query.replace("@" + str(key), str(value))
+# One warehouse connection per worker thread, reused across that thread's
+# queries. Before, every query built a MySqlHook (Airflow metadata-DB lookup)
+# and opened + authenticated a fresh connection -- 1-2x per ticket.
+_THREAD_CONN = threading.local()
+_OPEN_CONNS: list = []
+_OPEN_CONNS_LOCK = threading.Lock()
+
+
+def _thread_connection(fresh: bool = False):
+    conn = getattr(_THREAD_CONN, "conn", None)
+    if conn is not None and not fresh:
+        return conn
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
     conn = _get_connection()
+    _THREAD_CONN.conn = conn
+    with _OPEN_CONNS_LOCK:
+        _OPEN_CONNS.append(conn)
+    return conn
+
+
+def close_thread_connections() -> None:
+    with _OPEN_CONNS_LOCK:
+        conns = list(_OPEN_CONNS)
+        _OPEN_CONNS.clear()
+    for conn in conns:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _select(conn, query: str) -> list[dict]:
     cursor = conn.cursor()
     try:
         cursor.execute(query)
@@ -171,7 +206,24 @@ def run_query(query: str, params: dict | None = None) -> list[dict]:
         return [dict(zip(columns, row)) for row in rows]
     finally:
         cursor.close()
-        conn.close()
+        try:
+            # End any implicit transaction so the next SELECT on this reused
+            # connection sees fresh data (same as a new connection would).
+            conn.commit()
+        except Exception:
+            pass
+
+
+def run_query(query: str, params: dict | None = None) -> list[dict]:
+    params = params or {}
+    for key, value in params.items():
+        query = query.replace("@" + str(key), str(value))
+    try:
+        return _select(_thread_connection(), query)
+    except Exception:
+        # Reused connection may have gone stale (server timeout etc.):
+        # retry the read once on a brand-new connection, as before.
+        return _select(_thread_connection(fresh=True), query)
 
 
 def execute_sql(query: str, many=None) -> int:
@@ -323,11 +375,27 @@ def process_tickets_task(**context):
     extract_meta = ti.xcom_pull(task_ids="extract_tickets", key="extract_meta")
     tickets = ti.xcom_pull(task_ids="extract_tickets", key="tickets") or []
 
-    results = []
-    for ticket in tickets:
-        r = process_ticket(ticket)
+    max_workers = max(1, int(_pick(context, "max_workers", 8)))
+
+    def _run_one(ticket):
+        r = process_ticket(ticket)  # never raises; errors come back as ok=False
         r["_problem_description"] = ticket.get("ProblemDescription")
-        results.append(r)
+        return r
+
+    # Each ticket is independent and almost all its time is spent waiting on
+    # the warehouse and the LLM proxy, so run them concurrently.
+    # executor.map keeps results in the same order as `tickets`.
+    try:
+        if max_workers == 1 or len(tickets) <= 1:
+            results = [_run_one(t) for t in tickets]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(max_workers, len(tickets)),
+                thread_name_prefix="ticket",
+            ) as pool:
+                results = list(pool.map(_run_one, tickets))
+    finally:
+        close_thread_connections()
 
     meta = {
         **extract_meta,
@@ -433,6 +501,7 @@ with DAG(
         "product": "",
         "include_resolved": True,
         "sr_number": "",
+        "max_workers": 8,
     },
 ) as dag:
 

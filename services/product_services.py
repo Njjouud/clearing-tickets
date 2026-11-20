@@ -8,6 +8,7 @@ if str(_ROOT) not in sys.path:
 
 import os
 import copy
+from functools import lru_cache
 
 # Optional override for notebook / non-Airflow runs:
 #   from services.product_services import set_query_runner
@@ -52,7 +53,13 @@ def run_query(query: str, params: dict = None):
 def load_sql(product: str, sql_file: str = None) -> str:
     """
     Load a SQL file from services/sql/<product>.
+    Cached: the file is read from disk once per process, not once per ticket.
     """
+    return _load_sql_cached(product, sql_file)
+
+
+@lru_cache(maxsize=None)
+def _load_sql_cached(product: str, sql_file: str = None) -> str:
 
     if sql_file is None:
         sql_file = f"fetch_{product}_transaction.sql"

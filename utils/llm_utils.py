@@ -9,6 +9,7 @@ if str(_ROOT) not in sys.path:
 import json
 import os
 import re
+import threading
 
 import requests
 
@@ -58,60 +59,15 @@ def _parse_label(content: str) -> str:
             return label
     return "other"
 
-def _litellm_settings():
+_SETTINGS_LOCK = threading.Lock()
+_SETTINGS_CACHE = None  # (base, key) once resolved
 
-    """Resolve URL / key / model. In config.py, LITELLM_BASE_URL is an Airflow
 
-    Connection id and LITELLM_API_KEY may be an Airflow Variable name."""
-
-    base = LITELLM_BASE_URL
-
-    key = LITELLM_API_KEY
-
-    model = os.getenv("LITELLM_MODEL") or LITELLM_MODEL
-
-    if not base.startswith("http"):
-
-        from airflow.hooks.base import BaseHook
-
-        conn = BaseHook.get_connection(base)
-
-        host = (conn.host or "").rstrip("/")
-
-        if not host.startswith("http"):
-
-            host = f"{conn.schema or 'https'}://{host}"
-
-        if conn.port and f":{conn.port}" not in host:
-
-            host = f"{host}:{conn.port}"
-
-        base = host
-
-        if conn.password:
-
-            key = conn.password
-
-    if key == LITELLM_API_KEY:  # still a name, not a real key: try it as a Variable
-
-        try:
-
-            from airflow.models import Variable
-
-            key = Variable.get(LITELLM_API_KEY, default_var=key)
-
-        except Exception:
-
-            pass
-
-    return base.rstrip("/"), key, model
-
-def _litellm_settings():
-    """Resolve URL / key / model. In config.py, LITELLM_BASE_URL is an Airflow
+def _resolve_base_and_key():
+    """Resolve URL / key. In config.py, LITELLM_BASE_URL is an Airflow
     Connection id and LITELLM_API_KEY may be an Airflow Variable name."""
     base = LITELLM_BASE_URL
     key = LITELLM_API_KEY
-    model = os.getenv("LITELLM_MODEL") or LITELLM_MODEL
     if not base.startswith("http"):
         from airflow.hooks.base import BaseHook
         conn = BaseHook.get_connection(base)
@@ -129,14 +85,42 @@ def _litellm_settings():
             key = Variable.get(LITELLM_API_KEY, default_var=key)
         except Exception:
             pass
-    return base.rstrip("/"), key, model
- 
+    return base.rstrip("/"), key
+
+
+def _litellm_settings():
+    """Same result as before, but the Airflow Connection / Variable lookups
+    (metadata-DB round trips) run once per process instead of once per LLM
+    call. A failed lookup is not cached, so it is retried next call."""
+    global _SETTINGS_CACHE
+    if _SETTINGS_CACHE is None:
+        with _SETTINGS_LOCK:
+            if _SETTINGS_CACHE is None:
+                _SETTINGS_CACHE = _resolve_base_and_key()
+    base, key = _SETTINGS_CACHE
+    model = os.getenv("LITELLM_MODEL") or LITELLM_MODEL
+    return base, key, model
+
+
+_HTTP = threading.local()
+
+
+def _http_session() -> requests.Session:
+    """One keep-alive session per thread: reuses the TCP/TLS connection to the
+    LiteLLM proxy instead of a new handshake on every call."""
+    session = getattr(_HTTP, "session", None)
+    if session is None:
+        session = requests.Session()
+        _HTTP.session = session
+    return session
+
+
 def _chat(messages, temperature=0, max_tokens=256, timeout=60) -> str:
     """Call the LiteLLM proxy (OpenAI-compatible) over plain HTTP. No extra libraries."""
     base, api_key, model = _litellm_settings()
     url = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
 
-    r = requests.post(
+    r = _http_session().post(
         url,
         headers={"Authorization": f"Bearer {api_key}"},
         json={

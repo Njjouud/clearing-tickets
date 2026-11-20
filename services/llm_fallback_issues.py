@@ -72,49 +72,10 @@ def _eligible_candidates(catalog: list, row: dict) -> list:
         if _category_matches(issue, row) and _guard_passes(issue.get("data_guard"), row)
     ]
 
-def _litellm_settings():
-    """Resolve URL / key / model. In config.py, LITELLM_BASE_URL is an Airflow
-    Connection id and LITELLM_API_KEY may be an Airflow Variable name."""
-    base = LITELLM_BASE_URL
-    key = LITELLM_API_KEY
-    model = os.getenv("LITELLM_MODEL") or LITELLM_MODEL
-    if not base.startswith("http"):
-        from airflow.hooks.base import BaseHook
-        conn = BaseHook.get_connection(base)
-        host = (conn.host or "").rstrip("/")
-        if not host.startswith("http"):
-            host = f"{conn.schema or 'https'}://{host}"
-        if conn.port and f":{conn.port}" not in host:
-            host = f"{host}:{conn.port}"
-        base = host
-        if conn.password:
-            key = conn.password
-    if key == LITELLM_API_KEY:  # still a name, not a real key: try it as a Variable
-        try:
-            from airflow.models import Variable
-            key = Variable.get(LITELLM_API_KEY, default_var=key)
-        except Exception:
-            pass
-    return base.rstrip("/"), key, model
-
-def _chat(messages, temperature=0, max_tokens=256, timeout=60) -> str:
-    """Call the LiteLLM proxy (OpenAI-compatible) over plain HTTP. No extra libraries."""
-    base, api_key, model = _litellm_settings()
-    url = base + ("/chat/completions" if base.endswith("/v1") else "/v1/chat/completions")
-
-    r = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        },
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    return (r.json()["choices"][0]["message"].get("content") or "").strip()
+# Same LiteLLM client as utils/llm_utils.py (identical code was duplicated
+# here); sharing it means one cached settings lookup and one keep-alive
+# HTTP session per thread for both LLM call sites.
+from utils.llm_utils import _chat  # noqa: E402
 
 
 def _parse_issue_id(content: str, valid_ids: set) -> Optional[str]:
