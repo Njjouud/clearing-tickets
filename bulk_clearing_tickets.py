@@ -15,7 +15,9 @@ LLM settings (Airflow Variables, fall back to config.py if missing):
   litellm_clearing_tickets_model  -> model name, e.g. groq/openai/gpt-oss-20b
 
 Trigger params (or dag_run.conf):
-  limit, lookback_days, product ("cards" / "rmt" / "" for all), include_resolved,
+  limit, lookback_days, product ("cards" / "rmt" / "" for all),
+  include_resolved -> default False: tickets with StatusTypeCd = ORA_SVC_RESOLVED
+                      are skipped. True = process resolved tickets too.
   sr_number  -> reprocess one ticket by SrNumber (bypasses filters, overwrites
                 its previous result in both tables)
   max_workers -> tickets processed concurrently in process_tickets (default 4;
@@ -291,7 +293,14 @@ def extract_tickets_task(**context):
     product = _pick(context, "product", "") or None
     if isinstance(product, str):
         product = product.strip() or None
-    include_resolved = bool(_pick(context, "include_resolved", True))
+    # Resolved tickets (StatusTypeCd = ORA_SVC_RESOLVED) are excluded unless
+    # include_resolved is explicitly true. Parse strings too: bool("false")
+    # is True in Python, so a conf value of "false" used to count as true.
+    raw_include = _pick(context, "include_resolved", False)
+    if isinstance(raw_include, str):
+        include_resolved = raw_include.strip().lower() in {"1", "true", "yes", "y"}
+    else:
+        include_resolved = bool(raw_include)
     include_resolved_flag = 1 if include_resolved else 0
     sr_number = _pick(context, "sr_number", "") or None
     if isinstance(sr_number, str):
@@ -324,7 +333,7 @@ def extract_tickets_task(**context):
           AND TRIM(t.TransactionID_c) != ''
           AND LOWER(TRIM(t.CategoryLevel1_c)) IN ({cats_sql})
           AND (
-                {include_resolved_flag} = 0
+                {include_resolved_flag} = 1
              OR t.StatusTypeCd != 'ORA_SVC_RESOLVED'
              OR t.StatusTypeCd IS NULL
           )
@@ -601,7 +610,7 @@ with DAG(
         "limit": 50,
         "lookback_days": 30,
         "product": "",
-        "include_resolved": True,
+        "include_resolved": False,
         "sr_number": "",
         "max_workers": 4,
         "write_retry_attempts": 3,
