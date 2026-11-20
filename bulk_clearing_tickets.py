@@ -18,6 +18,12 @@ Trigger params (or dag_run.conf):
   limit, lookback_days, product ("cards" / "rmt" / "" for all), include_resolved,
   sr_number  -> reprocess one ticket by SrNumber (bypasses filters, overwrites
                 its previous result in both tables)
+  max_workers -> tickets processed concurrently in process_tickets (default 4;
+                 1 = the old one-at-a-time behaviour). Results keep extract order.
+  write_retry_attempts       -> in write_results, re-run tickets that failed with a
+                                transient error (lost connection, StarRocks memory
+                                limit, LLM busy) up to N times, one at a time (default 3)
+  write_retry_delay_seconds  -> pause before retry round k = k * this (default 30)
 """
 
 from __future__ import annotations
@@ -25,6 +31,8 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -158,11 +166,42 @@ def _get_connection():
     return MySqlHook(mysql_conn_id=MYSQL_CONN_ID).get_conn()
 
 
-def run_query(query: str, params: dict | None = None) -> list[dict]:
-    params = params or {}
-    for key, value in params.items():
-        query = query.replace("@" + str(key), str(value))
+# One warehouse connection per worker thread, reused across that thread's
+# queries. Before, every query built a MySqlHook (Airflow metadata-DB lookup)
+# and opened + authenticated a fresh connection -- 1-2x per ticket.
+_THREAD_CONN = threading.local()
+_OPEN_CONNS: list = []
+_OPEN_CONNS_LOCK = threading.Lock()
+
+
+def _thread_connection(fresh: bool = False):
+    conn = getattr(_THREAD_CONN, "conn", None)
+    if conn is not None and not fresh:
+        return conn
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
     conn = _get_connection()
+    _THREAD_CONN.conn = conn
+    with _OPEN_CONNS_LOCK:
+        _OPEN_CONNS.append(conn)
+    return conn
+
+
+def close_thread_connections() -> None:
+    with _OPEN_CONNS_LOCK:
+        conns = list(_OPEN_CONNS)
+        _OPEN_CONNS.clear()
+    for conn in conns:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _select(conn, query: str) -> list[dict]:
     cursor = conn.cursor()
     try:
         cursor.execute(query)
@@ -171,7 +210,24 @@ def run_query(query: str, params: dict | None = None) -> list[dict]:
         return [dict(zip(columns, row)) for row in rows]
     finally:
         cursor.close()
-        conn.close()
+        try:
+            # End any implicit transaction so the next SELECT on this reused
+            # connection sees fresh data (same as a new connection would).
+            conn.commit()
+        except Exception:
+            pass
+
+
+def run_query(query: str, params: dict | None = None) -> list[dict]:
+    params = params or {}
+    for key, value in params.items():
+        query = query.replace("@" + str(key), str(value))
+    try:
+        return _select(_thread_connection(), query)
+    except Exception:
+        # Reused connection may have gone stale (server timeout etc.):
+        # retry the read once on a brand-new connection, as before.
+        return _select(_thread_connection(fresh=True), query)
 
 
 def execute_sql(query: str, many=None) -> int:
@@ -323,11 +379,27 @@ def process_tickets_task(**context):
     extract_meta = ti.xcom_pull(task_ids="extract_tickets", key="extract_meta")
     tickets = ti.xcom_pull(task_ids="extract_tickets", key="tickets") or []
 
-    results = []
-    for ticket in tickets:
-        r = process_ticket(ticket)
+    max_workers = max(1, int(_pick(context, "max_workers", 4)))
+
+    def _run_one(ticket):
+        r = process_ticket(ticket)  # never raises; errors come back as ok=False
         r["_problem_description"] = ticket.get("ProblemDescription")
-        results.append(r)
+        return r
+
+    # Each ticket is independent and almost all its time is spent waiting on
+    # the warehouse and the LLM proxy, so run them concurrently.
+    # executor.map keeps results in the same order as `tickets`.
+    try:
+        if max_workers == 1 or len(tickets) <= 1:
+            results = [_run_one(t) for t in tickets]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(max_workers, len(tickets)),
+                thread_name_prefix="ticket",
+            ) as pool:
+                results = list(pool.map(_run_one, tickets))
+    finally:
+        close_thread_connections()
 
     meta = {
         **extract_meta,
@@ -350,6 +422,97 @@ def process_tickets_task(**context):
 # Write
 # ---------------------------------------------------------------------------
 
+# Errors worth retrying: the warehouse was overloaded or dropped the
+# connection, or the LLM proxy was busy. Anything else (e.g. "No transaction
+# found") is a real result and retrying would give the same answer.
+TRANSIENT_ERROR_MARKERS = (
+    "lost connection",            # MySQL 2013
+    "server has gone away",       # MySQL 2006
+    "can't connect",              # MySQL 2003
+    "memory of process exceed",   # StarRocks memory limit
+    "mem usage",
+    "exceed limit",
+    "timed out",
+    "timeout",
+    "too many requests",          # LLM 429
+    "429",
+    "502", "503", "504",
+    "connection reset",
+    "connection aborted",
+    "connectionerror",
+    "readtimeout",
+)
+
+
+def _is_transient_failure(r: dict) -> bool:
+    if r.get("ok"):
+        return False
+    text = f"{r.get('error_type') or ''} {r.get('error') or ''}".lower()
+    return any(marker in text for marker in TRANSIENT_ERROR_MARKERS)
+
+
+def _retry_failed_tickets(results: list[dict], tickets: list[dict], context) -> list[dict]:
+    """Re-run tickets that failed with a transient error, one at a time
+    (no concurrency, so the warehouse isn't hit by parallel heavy queries),
+    with a growing pause between rounds. Same process_ticket() as the
+    process step, so a retried ticket gets exactly the same decision logic.
+    Returns `results` with successful retries swapped in, same order."""
+    import time
+
+    attempts = max(0, int(_pick(context, "write_retry_attempts", 3)))
+    base_delay = max(0, int(_pick(context, "write_retry_delay_seconds", 30)))
+    if attempts == 0:
+        return results
+
+    failed_idx = [i for i, r in enumerate(results) if _is_transient_failure(r)]
+    if not failed_idx:
+        return results
+
+    _wire_llm_env()
+    os.environ["MATCH_DEBUG"] = "0"
+    from services.product_services import set_query_runner
+    from dag_pipeline.process_tickets import process_ticket
+
+    set_query_runner(run_query)
+
+    # Full extracted ticket (incl. BaraqInternalID_c, ProblemDescription,
+    # product) -- the result only carries a snapshot.
+    by_sr = {str(t.get("SrNumber")): t for t in tickets if t.get("SrNumber")}
+
+    results = list(results)
+    try:
+        for attempt in range(1, attempts + 1):
+            pending = [i for i in failed_idx if _is_transient_failure(results[i])]
+            if not pending:
+                break
+            delay = base_delay * attempt
+            print(f"Retry {attempt}/{attempts}: {len(pending)} ticket(s) "
+                  f"failed with transient errors; waiting {delay}s")
+            if delay:
+                time.sleep(delay)
+            # Drop any connection that may have been killed by the server.
+            close_thread_connections()
+            _THREAD_CONN.conn = None
+            for i in pending:
+                sr = str((results[i].get("ticket") or {}).get("SrNumber"))
+                ticket = by_sr.get(sr)
+                if ticket is None:
+                    print(f"  {sr}: original ticket not in extract XCom, can't retry")
+                    continue
+                r = process_ticket(ticket)
+                r["_problem_description"] = ticket.get("ProblemDescription")
+                r = _jsonable(r)
+                results[i] = r
+                status = "ok" if r.get("ok") else f"failed again: {str(r.get('error'))[:120]}"
+                print(f"  {sr}: {status}")
+    finally:
+        close_thread_connections()
+
+    still = sum(1 for i in failed_idx if not results[i].get("ok"))
+    print(f"Retries done: {len(failed_idx) - still} recovered, {still} still failing")
+    return results
+
+
 def write_results_task(**context):
     _ensure_imports()
     from config import TARGET_TABLE, NO_MATCH_TABLE
@@ -362,6 +525,13 @@ def write_results_task(**context):
     process_meta = ti.xcom_pull(task_ids="process_tickets", key="process_meta")
     results = ti.xcom_pull(task_ids="process_tickets", key="results") or []
     results = [r for r in results if (r.get("ticket") or {}).get("SrNumber")]
+
+    # Retry tickets that failed for transient reasons (warehouse memory /
+    # lost connection / LLM busy) before anything is written.
+    tickets = ti.xcom_pull(task_ids="extract_tickets", key="tickets") or []
+    results = _retry_failed_tickets(results, tickets, context)
+    ok_count = sum(1 for r in results if r.get("ok"))
+    error_count = sum(1 for r in results if not r.get("ok"))
 
     execute_sql(CREATE_NO_MATCH_SQL.format(table=NO_MATCH_TABLE))
 
@@ -392,8 +562,8 @@ def write_results_task(**context):
 
     summary = {
         "ticket_count": process_meta.get("ticket_count", 0),
-        "ok_count": process_meta.get("ok_count", 0),
-        "error_count": process_meta.get("error_count", 0),
+        "ok_count": ok_count,
+        "error_count": error_count,
         "inserted_matches": inserted_match,
         "inserted_no_matches": inserted_nomatch,
         "target_table": TARGET_TABLE,
@@ -433,6 +603,9 @@ with DAG(
         "product": "",
         "include_resolved": True,
         "sr_number": "",
+        "max_workers": 4,
+        "write_retry_attempts": 3,
+        "write_retry_delay_seconds": 30,
     },
 ) as dag:
 
