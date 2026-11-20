@@ -29,7 +29,17 @@ WITH ticket_data AS (
         , u.first_name
         , u.first_name_en
     FROM polaris.`base.oci_crm_db`.all_service_requests t
-    LEFT JOIN polaris.`base.customer_identity_db`.users u
+    LEFT JOIN (
+        -- Pre-filter users to the ticket owner(s) for this transaction id. Same
+        -- join result as joining the whole table, without hashing all users.
+        SELECT uu.*
+        FROM polaris.`base.customer_identity_db`.users uu
+        WHERE TRIM(CAST(uu.user_id AS VARCHAR)) IN (
+            SELECT TRIM(CAST(tk.BaraqInternalID_c AS VARCHAR))
+            FROM polaris.`base.oci_crm_db`.all_service_requests tk
+            WHERE UPPER(TRIM(CAST(tk.TransactionID_c AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
+        )
+    ) u
         ON TRIM(CAST(u.user_id AS VARCHAR)) = TRIM(CAST(t.BaraqInternalID_c AS VARCHAR))
     WHERE UPPER(TRIM(CAST(t.TransactionID_c AS VARCHAR)))
         = UPPER(TRIM('@TransactionID_c'))
@@ -83,6 +93,8 @@ account_ledger_filtered AS (
     JOIN ticket_txns tt
       ON UPPER(TRIM(CAST(al.txn_category_txn_id AS VARCHAR)))
        = tt.transaction_id
+    -- ticket_txns only ever holds this id; filter the ledger scan directly.
+    WHERE UPPER(TRIM(CAST(al.txn_category_txn_id AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
 ),
 wallet_txn AS (
     SELECT
@@ -95,6 +107,7 @@ wallet_txn AS (
         SELECT transaction_id
         FROM ticket_txns
     )
+      AND UPPER(TRIM(CAST(txn_category_txn_id AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
 ),
 card_provision AS (
     SELECT
@@ -208,13 +221,24 @@ billed_twice AS (
         LEFT JOIN polaris.`base.core_wallet_db`.customer_wallet_ledger cwl
             ON UPPER(TRIM(CAST(cwl.txn_category_txn_id AS VARCHAR)))
              = UPPER(TRIM(CAST(at2.transaction_id AS VARCHAR)))
+            AND UPPER(TRIM(CAST(cwl.txn_category_txn_id AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
         WHERE UPPER(TRIM(CAST(at2.transaction_id AS VARCHAR))) IN (
             SELECT UPPER(TRIM(CAST(transaction_id AS VARCHAR)))
             FROM ticket_status
         )
+          AND UPPER(TRIM(CAST(at2.transaction_id AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
           AND at2.cif IN (SELECT cif FROM ticket_status WHERE cif IS NOT NULL)
     ) base
-    LEFT JOIN polaris.`base.card_hub_payment_engine_db`.authorization_transaction other
+    LEFT JOIN (
+        -- Only auths of the same customer(s) can match (cif join below).
+        SELECT o.*
+        FROM polaris.`base.card_hub_payment_engine_db`.authorization_transaction o
+        WHERE TRIM(CAST(o.cif AS VARCHAR)) IN (
+            SELECT TRIM(CAST(a3.cif AS VARCHAR))
+            FROM polaris.`base.card_hub_payment_engine_db`.authorization_transaction a3
+            WHERE UPPER(TRIM(CAST(a3.transaction_id AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
+        )
+    ) other
         ON TRIM(CAST(other.cif AS VARCHAR)) = TRIM(CAST(base.cif AS VARCHAR))
        AND other.card_acceptor_id = base.card_acceptor_id
        AND UPPER(TRIM(CAST(other.transaction_id AS VARCHAR)))
@@ -223,7 +247,18 @@ billed_twice AS (
        AND ABS(
             UNIX_TIMESTAMP(other.created_date) - UNIX_TIMESTAMP(base.created_date)
        ) <= 300
-    LEFT JOIN polaris.`base.core_wallet_db`.customer_wallet_ledger other_cwl
+    LEFT JOIN (
+        -- Only ledger rows with the same amount as this transaction can
+        -- match (amount join below) -- avoids hashing the whole ledger.
+        SELECT w.*
+        FROM polaris.`base.core_wallet_db`.customer_wallet_ledger w
+        WHERE w.txn_amount IN (
+            SELECT w2.txn_amount
+            FROM polaris.`base.core_wallet_db`.customer_wallet_ledger w2
+            WHERE UPPER(TRIM(CAST(w2.txn_category_txn_id AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
+              AND w2.txn_amount IS NOT NULL
+        )
+    ) other_cwl
         ON UPPER(TRIM(CAST(other_cwl.txn_category_txn_id AS VARCHAR)))
          = UPPER(TRIM(CAST(other.transaction_id AS VARCHAR)))
        AND base.txn_amount IS NOT NULL
@@ -250,6 +285,7 @@ wallet_refund AS (
         SELECT UPPER(TRIM(CAST(transaction_id AS VARCHAR)))
         FROM ticket_status
     )
+      AND UPPER(TRIM(CAST(cwl.txn_category_txn_id AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
     GROUP BY UPPER(TRIM(CAST(cwl.txn_category_txn_id AS VARCHAR)))
 ),
 latest_provider_account AS (
@@ -378,6 +414,7 @@ INNER JOIN polaris.`base.card_hub_payment_engine_db`.authorization_transaction a
     ON UPPER(TRIM(CAST(tcs.transaction_id AS VARCHAR)))
      = UPPER(TRIM(CAST(at2.transaction_id AS VARCHAR)))
     AND TRIM(CAST(at2.cif AS VARCHAR)) = TRIM(CAST(tcs.cif AS VARCHAR))
+    AND UPPER(TRIM(CAST(at2.transaction_id AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))  -- implied; filters the scan
 LEFT JOIN latest_provider_account tpa
     ON UPPER(TRIM(CAST(tpa.txn_category_txn_id AS VARCHAR)))
      = UPPER(TRIM(CAST(at2.transaction_id AS VARCHAR)))
