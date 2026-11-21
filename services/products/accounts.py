@@ -12,13 +12,10 @@ from services.products.base import ProductEngine
 from services.rules import load_static_rules, match_rule
 from services.product_services import load_sql, run_query, as_flag, row_get
 
-# Latest application-check status values that mean "all checks passed".
-# Anything not listed here (and not PENDING / FAILED / INCOMPLETE) matches no
-# routing rule, so the ticket is escalated for review instead of guessed.
-APP_CHECK_PASSED_VALUES = {
-    "PASSED", "PASS", "SUCCESS", "SUCCEEDED", "COMPLETED", "COMPLETE",
-    "APPROVED", "VERIFIED", "DONE",
-}
+# user_application_checks.status values seen in the warehouse:
+# PASSED / PENDING / FAILED / INCOMPLETE. Only PASSED means "passed";
+# anything else unexpected matches no routing rule (escalated for review).
+APP_CHECK_PASSED_VALUES = {"PASSED"}
 
 # Balance-transfer approval bands (SAR), from the Account & Registration
 # booklet section 11: <= 2,000 / > 2,000 and <= 10,000 / > 10,000.
