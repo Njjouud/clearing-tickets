@@ -94,3 +94,32 @@ NO_MATCH_TABLE = "jake_exploration.clearing_backlog__service_work"
 ENSURE_NO_MATCH_TABLE = True  # create backlog table if missing
 
  
+# ─────────────────────────────────────────────
+# Accounts DAG (accounts_clearing_tickets.py / clearing_backlog_accounts)
+# ─────────────────────────────────────────────
+ACCOUNTS_OCI_CATEGORY = "account and registration"  # LOWER(TRIM(CategoryLevel1_c))
+ACCOUNTS_TARGET_TABLE = TARGET_TABLE                # matched (routed) tickets
+ACCOUNTS_NO_MATCH_TABLE = NO_MATCH_TABLE            # not in the routing matrix
+
+# Sprinklr cases for Account Operations. Disabled while "table" is None.
+# Fill "table" and every column marked REQUIRED to switch it on; the DAG
+# renames these columns to the OCI names so the same engine/rules apply.
+SPRINKLR_ACCOUNTS = {
+    "table": None,  # e.g. "polaris.`base.sprinklr_db`.cases"
+    "category_column": "universal_case_custom_property_32",
+    "category_value": "Account Operations",
+    "columns": {             # OCI name          -> Sprinklr column
+        "SrNumber": None,            # REQUIRED  case number
+        "BaraqInternalID_c": None,   # REQUIRED  customer User ID
+        "CreationDate": None,        # REQUIRED  case created date
+        "CategoryLevel2_c": None,    # subcategory, e.g. "Account closure request"
+        "CategoryLevel3_c": None,
+        "ProblemDescription": None,
+        "StatusTypeCd": None,        # case status (used to skip resolved)
+        "StatusTypeCdMeaning": None,
+        "QueueName": None,
+        "SrId": None,
+        "TransactionID_c": None,
+    },
+    "resolved_values": [],   # StatusTypeCd values that mean resolved/closed
+}
