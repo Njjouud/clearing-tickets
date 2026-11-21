@@ -793,9 +793,12 @@ def match_rule(row, rules_df):
             elif isinstance(expected_value, str) and (
                 expected_value.startswith("%") or expected_value.endswith("%")
             ):
+                # SQL LIKE: % = any text. Escape each literal piece and join
+                # with ".*" (re.escape no longer escapes "%" on Python 3.7+,
+                # so the old escape-then-replace never produced a wildcard).
                 pattern = (
                     "^"
-                    + re.escape(expected_value).replace(r"\%", ".*")
+                    + ".*".join(re.escape(part) for part in expected_value.split("%"))
                     + "$"
                 )
                 text = "" if actual_value is None else str(actual_value)
