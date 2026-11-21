@@ -15,7 +15,8 @@ LLM settings (Airflow Variables, fall back to config.py if missing):
   litellm_clearing_tickets_model  -> model name, e.g. groq/openai/gpt-oss-20b
 
 Trigger params (or dag_run.conf):
-  limit, lookback_days, product ("cards" / "rmt" / "" for all),
+  limit, lookback_days, product ("cards" / "rmt" / "accounts";
+                               "" = cards + rmt),
   include_resolved -> default False: tickets with StatusTypeCd = ORA_SVC_RESOLVED
                       are skipped. True = process resolved tickets too.
   sr_number  -> reprocess one ticket by SrNumber (bypasses filters, overwrites
@@ -286,7 +287,7 @@ def _is_matched(r: dict) -> bool:
 
 def extract_tickets_task(**context):
     _ensure_imports()
-    from config import PRODUCT_MAP, TICKETS_TABLE
+    from config import PRODUCT_MAP, TICKETS_TABLE, NO_TRANSACTION_PRODUCTS
 
     limit = int(_pick(context, "limit", 50))
     lookback_days = int(_pick(context, "lookback_days", 30))
@@ -321,16 +322,33 @@ def extract_tickets_task(**context):
         if product:
             allowed_cats = sorted(c for c, key in PRODUCT_MAP.items() if key == product)
         else:
-            allowed_cats = sorted(PRODUCT_MAP.keys())
+            # "" = all products that are keyed by a transaction id (cards +
+            # rmt, as before). User-ID products (accounts) only run when
+            # asked for explicitly, so they can't crowd out the others.
+            allowed_cats = sorted(
+                c for c, key in PRODUCT_MAP.items()
+                if key not in NO_TRANSACTION_PRODUCTS
+            )
         if not allowed_cats:
             raise ValueError(f"No CategoryLevel1_c mapping for product={product!r}")
         cats_sql = ", ".join("'" + _sql_str(c) + "'" for c in allowed_cats)
 
+        if product in NO_TRANSACTION_PRODUCTS:
+            # Account tickets have no transaction id: require a User ID.
+            id_filter = (
+                "t.BaraqInternalID_c IS NOT NULL\n"
+                "          AND TRIM(t.BaraqInternalID_c) != ''"
+            )
+        else:
+            id_filter = (
+                "t.TransactionID_c IS NOT NULL\n"
+                "          AND TRIM(t.TransactionID_c) != ''"
+            )
+
         sql = f"""
         SELECT {TICKET_COLUMNS}
         FROM {TICKETS_TABLE} t
-        WHERE t.TransactionID_c IS NOT NULL
-          AND TRIM(t.TransactionID_c) != ''
+        WHERE {id_filter}
           AND LOWER(TRIM(t.CategoryLevel1_c)) IN ({cats_sql})
           AND (
                 {include_resolved_flag} = 1

@@ -7,6 +7,7 @@ import os
 PRODUCT_MAP = {
     "international transfer": "rmt",
     "cards": "cards",
+    "account and registration": "accounts",
     # later more products to be added
 }
 
@@ -78,6 +79,11 @@ MTO_EMAIL_BODY_INTRO = (
     "Dears,\n"
     "Kindly confirm the status of the transactions below:\n\n"
 )
+
+# Products whose tickets have no TransactionID_c: extracted by User ID
+# (BaraqInternalID_c) instead, and only when the DAG is triggered with
+# that product explicitly (product="" keeps the old cards + rmt run).
+NO_TRANSACTION_PRODUCTS = ("accounts",)
 
 TICKETS_TABLE = "polaris.`base.oci_crm_db`.all_service_requests"
 # Matched rules → agent work (existing table, INSERT only)

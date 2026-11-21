@@ -37,6 +37,9 @@ def _load_static_rules_cached(product: str):
     if product == "cards":
         return _load_cards_rules()
 
+    if product == "accounts":
+        return _load_accounts_rules()
+
     raise ValueError(f"No rules defined for product: '{product}'")
 
 
@@ -601,6 +604,127 @@ def _load_cards_rules():
 
     ]
     _assert_cards_en_ar_pairs(rules)
+    return pd.DataFrame(rules)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# ACCOUNTS (Account & Registration) — routing per the booklet's
+# "CIF Status & Application Check Assignment Matrix" (sections 3, 4, 6).
+#
+# These rules ROUTE the ticket to a department; they never close it.
+# response_en is an internal routing note (same style as the NO_MATCH
+# notes) until customer-facing EN/AR replies are provided.
+#
+# Row fields (see services/products/accounts.py):
+#   cif_status        users.cif_status, upper-cased; blank -> "NO_CIF"
+#   app_check_status  latest user_application_checks.status:
+#                     "PASSED" | "PENDING" | "FAILED" | "INCOMPLETE" | other
+#   account_status    accounts.account_status (ACTIVE / CLOSED / ...)
+# Anything outside the matrix matches no rule -> escalated as NO_MATCH.
+# ─────────────────────────────────────────────────────────────────────────
+ACCOUNTS_VERIFICATION_STATUSES = [
+    "NO_CIF", "UNVERIFIED", "NAFATH_REQUIRED", "KYC_UPDATE", "RE_VERIFY",
+]
+
+# rule_id -> department route (used by dag_pipeline/write_service_work.py)
+ACCOUNTS_ROUTE_BY_RULE = {
+    1: "accounts/COMPLIANCE",
+    2: "accounts/ACCOUNT_OPERATION",
+    3: "accounts/ACCOUNT_OPERATION",
+    4: "accounts/ACCOUNT_OPERATION_BALANCE_TRANSFER",
+    5: "accounts/COMPLIANCE",
+    6: "accounts/TECHNOLOGY",
+    7: "accounts/COMPLIANCE",
+    8: "accounts/TECHNOLOGY",
+}
+
+
+def _route_note(dept: str, reason: str) -> dict:
+    return {
+        "en": f"ROUTE | dept={dept} | {reason}",
+        "ar": "",
+        "status": "ESCALATE",
+    }
+
+
+def _load_accounts_rules():
+    rules = [
+        {
+            # Section 6: personal data correction always goes to Compliance.
+            "rule_id": 1,
+            # Exact values (the %...% LIKE form in match_rule doesn't work on
+            # current Python: re.escape no longer escapes "%").
+            "conditions": {"CategoryLevel2_c": [
+                "Request to correct personal data",
+                "Request to Correct Personal Data",
+            ]},
+            "response": _route_note("COMPLIANCE", "subcategory=Request to correct personal data"),
+            "priority": 1,
+        },
+        {
+            # Section 4.1: Active CIF with a Closed account -> Account Operation.
+            "rule_id": 2,
+            "conditions": {"cif_status": "ACTIVE", "account_status": "CLOSED"},
+            "response": _route_note("ACCOUNT_OPERATION", "cif=ACTIVE + account=CLOSED"),
+            "priority": 2,
+        },
+        {
+            # Matrix: ACTIVE + all checks passed -> Account Operation.
+            "rule_id": 3,
+            "conditions": {"cif_status": "ACTIVE", "app_check_status": "PASSED"},
+            "response": _route_note("ACCOUNT_OPERATION", "cif=ACTIVE + checks passed"),
+            "priority": 3,
+        },
+        {
+            # Matrix: DECEASED / FINAL_EXIT / END_RELATIONSHIP + passed ->
+            # Account Operation; balance-transfer procedure (sections 9-12).
+            "rule_id": 4,
+            "conditions": {
+                "cif_status": ["DECEASED", "FINAL_EXIT", "END_RELATIONSHIP"],
+                "app_check_status": "PASSED",
+            },
+            "response": _route_note(
+                "ACCOUNT_OPERATION",
+                "balance transfer case (DECEASED/FINAL_EXIT/END_RELATIONSHIP) + checks passed",
+            ),
+            "priority": 4,
+        },
+        {
+            # Matrix: BLOCKED + passed -> Compliance.
+            "rule_id": 5,
+            "conditions": {"cif_status": "BLOCKED", "app_check_status": "PASSED"},
+            "response": _route_note("COMPLIANCE", "cif=BLOCKED + checks passed"),
+            "priority": 5,
+        },
+        {
+            # Matrix: ID_EXPIRED + passed -> Technology.
+            "rule_id": 6,
+            "conditions": {"cif_status": "ID_EXPIRED", "app_check_status": "PASSED"},
+            "response": _route_note("TECHNOLOGY", "cif=ID_EXPIRED + checks passed"),
+            "priority": 6,
+        },
+        {
+            # Matrix: NO CIF / UNVERIFIED / NAFATH_REQUIRED / KYC_UPDATE /
+            # RE_VERIFY + PENDING or FAILED -> Compliance.
+            "rule_id": 7,
+            "conditions": {
+                "cif_status": ACCOUNTS_VERIFICATION_STATUSES,
+                "app_check_status": ["PENDING", "FAILED"],
+            },
+            "response": _route_note("COMPLIANCE", "verification status + check PENDING/FAILED"),
+            "priority": 7,
+        },
+        {
+            # Matrix: same statuses + INCOMPLETE -> Technology.
+            "rule_id": 8,
+            "conditions": {
+                "cif_status": ACCOUNTS_VERIFICATION_STATUSES,
+                "app_check_status": "INCOMPLETE",
+            },
+            "response": _route_note("TECHNOLOGY", "verification status + check INCOMPLETE"),
+            "priority": 8,
+        },
+    ]
     return pd.DataFrame(rules)
 
 
