@@ -680,6 +680,13 @@ _ACC_DOCS_END_RELATIONSHIP = {
     "ar": "حياك الله {first_name} في برق، لتحويل رصيدك المتبقي نأمل تزويدنا بشهادة بنكية توضح رقم الآيبان المحلي ونسخة من الهوية الوطنية / الإقامة.",
     "status": "ESCALATE",
 }
+# INCOMPLETE = the customer still has to complete required information
+# (e.g. ADDRESS, FINANCIAL_INFO, EDD_GENERAL) -- ask them to finish it.
+_ACC_COMPLETE_INFO = {
+    "en": "Welcome {first_name}, some required information on your account is not complete yet. Please open the jake app and complete it so we can finish verifying your account.",
+    "ar": "حياك الله {first_name} في برق، بعض البيانات المطلوبة في حسابك غير مكتملة. نأمل الدخول إلى تطبيق برق واستكمالها حتى نتمكن من إكمال التحقق من حسابك.",
+    "status": "ESCALATE",
+}
 # Booklet 10.2 / FAQ Q13 (ID_EXPIRED).
 _ACC_ID_EXPIRED = {
     "en": "Welcome {first_name}, your ID appears to be expired. Please update it by providing your renewed Iqama. If you have left the Kingdom on a Final Exit visa, please provide a copy of the Final Exit visa and a local IBAN in your name so we can transfer your balance.",
@@ -781,12 +788,15 @@ def _load_accounts_rules():
         },
         {
             # Matrix: verification statuses + INCOMPLETE -> Technology.
+            # INCOMPLETE means the customer must complete it, so the reply
+            # asks them to. Also covers ACTIVE customers with an incomplete
+            # check (e.g. EDD / financial info), which the matrix omits.
             "rule_id": 12,
             "conditions": {
-                "cif_status": ACCOUNTS_VERIFICATION_STATUSES,
+                "cif_status": ["ACTIVE"] + ACCOUNTS_VERIFICATION_STATUSES,
                 "app_check_status": "INCOMPLETE",
             },
-            "response": _ACC_REVIEW,
+            "response": _ACC_COMPLETE_INFO,
             "priority": 12,
         },
     ]
