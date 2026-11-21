@@ -4,6 +4,12 @@ Used by bulk_clearing_tickets.py (cards + rmt) and
 accounts_clearing_tickets.py (Account & Registration). Each DAG file only
 defines its own extract step and DAG; process / write / DB / LLM helpers
 live here so both behave the same.
+
+Moved here (unchanged) from bulk_clearing_tickets.py, plus:
+  - run_query: one connection per worker thread, retried once on failure.
+  - process_tickets_task: tickets run in parallel (max_workers).
+  - write_results_task: retries temporarily-failed tickets before writing,
+    and takes optional target tables so each DAG can write elsewhere.
 """
 
 from __future__ import annotations

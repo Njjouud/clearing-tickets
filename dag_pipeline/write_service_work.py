@@ -1,5 +1,8 @@
 """Map engine results to clearing_backlog__service_work row dicts.
 
+Accounts product: routes come from services.rules.ACCOUNTS_ROUTE_BY_RULE
+(accounts/<DEPARTMENT>); unmatched tickets get accounts_* no-match reasons.
+
 Schema aligned with company_exploration.tickets_agent__agent_work.
 DB create/insert lives in the DAG / notebook.
 """

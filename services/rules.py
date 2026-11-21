@@ -643,6 +643,8 @@ ACCOUNTS_ROUTE_BY_RULE = {
     10: "accounts/TECHNOLOGY",
     11: "accounts/COMPLIANCE",
     12: "accounts/TECHNOLOGY",
+    13: "accounts/TECHNOLOGY",
+    14: "accounts/TECHNOLOGY",
 }
 
 _ACC_REVIEW = {
@@ -678,6 +680,21 @@ _ACC_DOCS_DECEASED = {
 _ACC_DOCS_END_RELATIONSHIP = {
     "en": "Welcome {first_name}, to transfer your remaining balance, please provide a bank certificate confirming a local IBAN and a copy of your National ID / Iqama.",
     "ar": "حياك الله {first_name} في برق، لتحويل رصيدك المتبقي نأمل تزويدنا بشهادة بنكية توضح رقم الآيبان المحلي ونسخة من الهوية الوطنية / الإقامة.",
+    "status": "ESCALATE",
+}
+# INCOMPLETE checks the customer can complete themselves (see
+# services/products/accounts.py CUSTOMER_COMPLETABLE_CHECKS). Replies never
+# name the check -- AML / EDD / sanctions etc. must not be disclosed.
+# No CIF yet: they never finished onboarding.
+_ACC_COMPLETE_REGISTRATION = {
+    "en": "Welcome {first_name}, your registration is not complete yet. Please open the jake app and complete the remaining steps so we can finish opening your account.",
+    "ar": "حياك الله {first_name} في برق، لم يكتمل تسجيلك بعد. نأمل الدخول إلى تطبيق برق واستكمال الخطوات المتبقية حتى نتمكن من إكمال فتح حسابك.",
+    "status": "ESCALATE",
+}
+# Has a CIF: they completed onboarding before and are being asked to update.
+_ACC_UPDATE_INFO = {
+    "en": "Welcome {first_name}, we need you to update some of your information. Please open the jake app and update the requested details.",
+    "ar": "حياك الله {first_name} في برق، نحتاج منك تحديث بعض بياناتك. نأمل الدخول إلى تطبيق برق وتحديث البيانات المطلوبة.",
     "status": "ESCALATE",
 }
 # Booklet 10.2 / FAQ Q13 (ID_EXPIRED).
@@ -780,14 +797,43 @@ def _load_accounts_rules():
             "priority": 11,
         },
         {
-            # Matrix: verification statuses + INCOMPLETE -> Technology.
+            # INCOMPLETE, no CIF, only customer-completable checks ->
+            # ask them to finish registration. Technology per the matrix.
             "rule_id": 12,
+            "conditions": {
+                "cif_status": "NO_CIF",
+                "app_check_status": "INCOMPLETE",
+                "incomplete_action": "CUSTOMER",
+            },
+            "response": _ACC_COMPLETE_REGISTRATION,
+            "priority": 12,
+        },
+        {
+            # INCOMPLETE, customer already has a CIF (completed onboarding
+            # before; e.g. re-collection requested), only customer-completable
+            # checks -> ask them to update their information.
+            "rule_id": 13,
+            "conditions": {
+                "cif_status": ["ACTIVE", "UNVERIFIED", "NAFATH_REQUIRED", "KYC_UPDATE", "RE_VERIFY"],
+                "app_check_status": "INCOMPLETE",
+                "incomplete_action": "CUSTOMER",
+            },
+            "response": _ACC_UPDATE_INFO,
+            "priority": 13,
+        },
+        {
+            # INCOMPLETE on an internal / sensitive check (AML, EDD,
+            # sanctions, ...): Technology per the matrix, neutral reply --
+            # nothing about the check is disclosed. (ACTIVE customers here
+            # fall outside the matrix -> NO_MATCH review.)
+            "rule_id": 14,
             "conditions": {
                 "cif_status": ACCOUNTS_VERIFICATION_STATUSES,
                 "app_check_status": "INCOMPLETE",
+                "incomplete_action": "INTERNAL",
             },
             "response": _ACC_REVIEW,
-            "priority": 12,
+            "priority": 14,
         },
     ]
     return pd.DataFrame(rules)

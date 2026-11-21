@@ -33,6 +33,30 @@ def approval_band(balance) -> Optional[str]:
     return "REGULATORY_COMPLIANCE"
 
 
+# INCOMPLETE checks the customer may be asked to complete themselves:
+# only these types, and only when needs_user_input = 1. Every other
+# incomplete check (AML, sanctions, FINSCAN, blacklist, compliance
+# approval, EDD, ELM, data cleansing, ...) is internal/sensitive: the
+# customer gets a neutral reply and is never told about it.
+CUSTOMER_COMPLETABLE_CHECKS = {"ADDRESS", "FINANCIAL_INFO", "MINOR_PARENT_NAFATH"}
+
+
+def incomplete_action(app_checks_incomplete) -> Optional[str]:
+    """'CUSTOMER' when every INCOMPLETE check is customer-completable,
+    'INTERNAL' when any is not, None when nothing is incomplete."""
+    text = str(app_checks_incomplete or "").strip()
+    if not text:
+        return None
+    for item in text.split(","):
+        check_type, _, needs_input = item.strip().rpartition(":")
+        if not check_type:
+            check_type, needs_input = needs_input, "0"
+        if (check_type.strip().upper() not in CUSTOMER_COMPLETABLE_CHECKS
+                or needs_input.strip() != "1"):
+            return "INTERNAL"
+    return "CUSTOMER"
+
+
 def has_balance(balance) -> int:
     """1 when there is a positive balance left to transfer."""
     if balance is None or balance == "":
@@ -109,6 +133,7 @@ class AccountsEngine(ProductEngine):
             "cif_super_status": row_get(db_row, "cif_super_status"),
             "app_check_status": normalize_app_check(db_row),
             "app_checks_not_passed": row_get(db_row, "app_checks_not_passed"),
+            "incomplete_action": incomplete_action(row_get(db_row, "app_checks_incomplete_list")),
             "account_status": (row_get(db_row, "account_status") or "").upper() or None,
             "wallet_balance": db_row.get("wallet_balance"),
             "has_balance": has_balance(db_row.get("wallet_balance")),

@@ -6,6 +6,20 @@ Flow: extract tickets -> run rules engine -> write
       no-matches -> NO_MATCH_TABLE (clearing_backlog__service_work)
 
 Same logic as bulk_clearing_tickets.py, split into three Airflow tasks.
+
+CHANGES (performance + reliability; decision logic unchanged):
+  - process_tickets runs tickets in parallel (max_workers, default 4;
+    1 = old one-at-a-time behaviour). Result order is unchanged.
+  - One warehouse connection per worker thread instead of a new
+    connection per query; a failed read is retried once on a fresh one.
+  - write_results first re-runs tickets that failed with a temporary
+    error (lost connection, StarRocks memory limit, LLM busy), one at a
+    time with a pause (write_retry_attempts / write_retry_delay_seconds).
+  - include_resolved was inverted; it now defaults to False and resolved
+    tickets (ORA_SVC_RESOLVED) are skipped.
+  - Process / write / DB / LLM code moved to dag_pipeline/dag_common.py,
+    shared with the accounts DAG. This file keeps only extract + the DAG.
+  - Account & Registration tickets run in accounts_clearing_tickets.py.
 Data passes between tasks via XCom (not /tmp — tasks can run on different workers).
 
 DB connection: MySqlHook(mysql_conn_id="gcp_mysql")

@@ -1,6 +1,11 @@
 """
 Airflow DAG: clearing_backlog_accounts
 
+NEW DAG. Rules: services/rules.py (_load_accounts_rules); customer data:
+services/sql/accounts/fetch_accounts_profile.sql; engine:
+services/products/accounts.py. Customer replies are drafts pending
+Account Operation approval and never mention AML / EDD / sanctions checks.
+
 Account & Registration tickets, separate from the cards / rmt DAG
 (bulk_clearing_tickets.py). Tickets are routed to Account Operation,
 Compliance or Technology using the booklet's CIF status / Application Check
