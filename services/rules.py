@@ -37,6 +37,9 @@ def _load_static_rules_cached(product: str):
     if product == "cards":
         return _load_cards_rules()
 
+    if product == "accounts":
+        return _load_accounts_rules()
+
     raise ValueError(f"No rules defined for product: '{product}'")
 
 
@@ -604,6 +607,191 @@ def _load_cards_rules():
     return pd.DataFrame(rules)
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# ACCOUNTS (Account & Registration) — routing per the booklet's
+# "CIF Status & Application Check Assignment Matrix" (sections 3, 4, 6, 7,
+# 10). Every rule ESCALATEs to a department (route in
+# ACCOUNTS_ROUTE_BY_RULE); none closes the ticket. The customer reply asks
+# for what the team needs next (confirmation / documents) or acknowledges.
+#
+# DRAFT replies -- wording to be approved by Account Operation.
+#
+# Row fields (services/products/accounts.py):
+#   cif_status        users.cif_status, upper-cased; blank -> "NO_CIF"
+#   app_check_status  latest record of EACH check type, summarised:
+#                     FAILED > PENDING > INCOMPLETE > PASSED (else OTHER)
+#   account_status    accounts.account_status of the MAIN account
+#   has_balance       1 when the wallet balance is > 0
+# Anything outside the matrix matches no rule -> escalated as NO_MATCH.
+# ─────────────────────────────────────────────────────────────────────────
+ACCOUNTS_VERIFICATION_STATUSES = [
+    "NO_CIF", "UNVERIFIED", "NAFATH_REQUIRED", "KYC_UPDATE", "RE_VERIFY",
+]
+ACCOUNTS_TRANSFER_STATUSES = ["DECEASED", "FINAL_EXIT", "END_RELATIONSHIP"]
+
+# rule_id -> department route (used by dag_pipeline/write_service_work.py)
+ACCOUNTS_ROUTE_BY_RULE = {
+    1: "accounts/COMPLIANCE",
+    2: "accounts/ACCOUNT_OPERATION",
+    3: "accounts/ACCOUNT_OPERATION_CLOSURE",
+    4: "accounts/ACCOUNT_OPERATION",
+    5: "accounts/ACCOUNT_OPERATION_BALANCE_TRANSFER",
+    6: "accounts/ACCOUNT_OPERATION_BALANCE_TRANSFER",
+    7: "accounts/ACCOUNT_OPERATION_BALANCE_TRANSFER",
+    8: "accounts/ACCOUNT_OPERATION",
+    9: "accounts/COMPLIANCE",
+    10: "accounts/TECHNOLOGY",
+    11: "accounts/COMPLIANCE",
+    12: "accounts/TECHNOLOGY",
+}
+
+_ACC_REVIEW = {
+    "en": "Welcome {first_name}, we have received your request and it is being reviewed by the specialized team. We will update you as soon as possible.",
+    "ar": "حياك الله {first_name} في برق، استلمنا طلبك وجاري مراجعته من قبل الفريق المختص، وراح نوافيك بالتحديث في أقرب وقت.",
+    "status": "ESCALATE",
+}
+_ACC_PERSONAL_DATA = {
+    "en": "Welcome {first_name}, we have received your request to correct your personal data and it has been forwarded to the specialized team for review. We will update you as soon as possible.",
+    "ar": "حياك الله {first_name} في برق، استلمنا طلب تصحيح بياناتك الشخصية وتم تحويله للفريق المختص للمراجعة، وراح نوافيك بالتحديث في أقرب وقت.",
+    "status": "ESCALATE",
+}
+# Booklet section 7: customer confirmation required before closing.
+_ACC_CLOSURE_CONFIRM = {
+    "en": "Welcome {first_name}, we have received your request to close your wallet. Please reply to this message to confirm that you would like to proceed with closing your wallet.",
+    "ar": "حياك الله {first_name} في برق، استلمنا طلب إغلاق محفظتك. نأمل تأكيد رغبتك في إغلاق المحفظة بالرد على هذه الرسالة.",
+    "status": "ESCALATE",
+}
+# Booklet 10.3 (FINAL_EXIT).
+_ACC_DOCS_FINAL_EXIT = {
+    "en": "Welcome {first_name}, to transfer your remaining balance, please provide: a copy of your Iqama, a copy of your passport, a bank certificate confirming a local IBAN, and a signed declaration that includes your full name, Iqama number, the beneficiary IBAN and bank, the beneficiary name, your relationship with the beneficiary, the total transfer amount, your approval of the transfer, and your signature and date.",
+    "ar": "حياك الله {first_name} في برق، لتحويل رصيدك المتبقي نأمل تزويدنا بالتالي: نسخة من الإقامة، نسخة من جواز السفر، شهادة بنكية توضح رقم الآيبان المحلي، وإقرار موقّع يتضمن: الاسم الكامل، رقم الإقامة، رقم الآيبان واسم البنك للمستفيد، اسم المستفيد، صلة القرابة بالمستفيد، إجمالي مبلغ التحويل، موافقتك على التحويل، والتوقيع والتاريخ.",
+    "status": "ESCALATE",
+}
+# Booklet 10.5 (DECEASED). Written to the representative -- deliberately no
+# {first_name} (that would be the deceased customer's name).
+_ACC_DOCS_DECEASED = {
+    "en": "Hello, please accept our condolences. To transfer the remaining balance, please provide: the representative's ID, a valid Power of Attorney that authorizes one person to act on behalf of the deceased and their heirs and explicitly authorizes contacting jake to withdraw or transfer the balance, and a bank certificate confirming a local IBAN belonging to the representative.",
+    "ar": "أهلاً بك، عظّم الله أجركم وأحسن عزاءكم. لتحويل الرصيد المتبقي نأمل تزويدنا بالتالي: هوية الممثل، وكالة شرعية سارية تخوّل شخصاً واحداً بالنيابة عن المتوفى وورثته وتتضمن نصاً صريحاً بالتواصل مع برق وسحب أو تحويل الرصيد، وشهادة بنكية توضح رقم الآيبان المحلي باسم الممثل.",
+    "status": "ESCALATE",
+}
+# Booklet 10.6 (END_RELATIONSHIP).
+_ACC_DOCS_END_RELATIONSHIP = {
+    "en": "Welcome {first_name}, to transfer your remaining balance, please provide a bank certificate confirming a local IBAN and a copy of your National ID / Iqama.",
+    "ar": "حياك الله {first_name} في برق، لتحويل رصيدك المتبقي نأمل تزويدنا بشهادة بنكية توضح رقم الآيبان المحلي ونسخة من الهوية الوطنية / الإقامة.",
+    "status": "ESCALATE",
+}
+# Booklet 10.2 / FAQ Q13 (ID_EXPIRED).
+_ACC_ID_EXPIRED = {
+    "en": "Welcome {first_name}, your ID appears to be expired. Please update it by providing your renewed Iqama. If you have left the Kingdom on a Final Exit visa, please provide a copy of the Final Exit visa and a local IBAN in your name so we can transfer your balance.",
+    "ar": "حياك الله {first_name} في برق، يظهر لدينا أن هويتك منتهية. نأمل تحديثها بتزويدنا بالإقامة المجددة، وفي حال مغادرتك المملكة بتأشيرة خروج نهائي نأمل تزويدنا بنسخة من تأشيرة الخروج النهائي ورقم آيبان محلي باسمك لتحويل رصيدك.",
+    "status": "ESCALATE",
+}
+
+
+def _load_accounts_rules():
+    rules = [
+        {
+            # Section 6: personal data correction -> Compliance.
+            "rule_id": 1,
+            "conditions": {"CategoryLevel2_c": [
+                "Request to correct personal data",
+                "Request to Correct Personal Data",
+            ]},
+            "response": _ACC_PERSONAL_DATA,
+            "priority": 1,
+        },
+        {
+            # Section 4.1: Active CIF with a Closed account -> Account Operation.
+            "rule_id": 2,
+            "conditions": {"cif_status": "ACTIVE", "account_status": "CLOSED"},
+            "response": _ACC_REVIEW,
+            "priority": 2,
+        },
+        {
+            # Section 7: closure request (active, checks passed) -> ask the
+            # customer to confirm before Account Operation acts.
+            "rule_id": 3,
+            "conditions": {
+                "cif_status": "ACTIVE",
+                "app_check_status": "PASSED",
+                "CategoryLevel2_c": ["Account closure request", "Account Closure Request"],
+            },
+            "response": _ACC_CLOSURE_CONFIRM,
+            "priority": 3,
+        },
+        {
+            # Matrix: ACTIVE + all checks passed -> Account Operation.
+            "rule_id": 4,
+            "conditions": {"cif_status": "ACTIVE", "app_check_status": "PASSED"},
+            "response": _ACC_REVIEW,
+            "priority": 4,
+        },
+        {
+            # Matrix + 10.3: FINAL_EXIT with a balance -> transfer documents.
+            "rule_id": 5,
+            "conditions": {"cif_status": "FINAL_EXIT", "app_check_status": "PASSED", "has_balance": 1},
+            "response": _ACC_DOCS_FINAL_EXIT,
+            "priority": 5,
+        },
+        {
+            # Matrix + 10.5: DECEASED with a balance -> representative documents.
+            "rule_id": 6,
+            "conditions": {"cif_status": "DECEASED", "app_check_status": "PASSED", "has_balance": 1},
+            "response": _ACC_DOCS_DECEASED,
+            "priority": 6,
+        },
+        {
+            # Matrix + 10.6: END_RELATIONSHIP with a balance -> documents.
+            "rule_id": 7,
+            "conditions": {"cif_status": "END_RELATIONSHIP", "app_check_status": "PASSED", "has_balance": 1},
+            "response": _ACC_DOCS_END_RELATIONSHIP,
+            "priority": 7,
+        },
+        {
+            # Matrix: DECEASED / FINAL_EXIT / END_RELATIONSHIP, no balance
+            # left -> Account Operation reviews (nothing to transfer).
+            "rule_id": 8,
+            "conditions": {"cif_status": ACCOUNTS_TRANSFER_STATUSES, "app_check_status": "PASSED"},
+            "response": _ACC_REVIEW,
+            "priority": 8,
+        },
+        {
+            # Matrix: BLOCKED + passed -> Compliance.
+            "rule_id": 9,
+            "conditions": {"cif_status": "BLOCKED", "app_check_status": "PASSED"},
+            "response": _ACC_REVIEW,
+            "priority": 9,
+        },
+        {
+            # Matrix: ID_EXPIRED + passed -> Technology.
+            "rule_id": 10,
+            "conditions": {"cif_status": "ID_EXPIRED", "app_check_status": "PASSED"},
+            "response": _ACC_ID_EXPIRED,
+            "priority": 10,
+        },
+        {
+            # Matrix: verification statuses + PENDING / FAILED -> Compliance.
+            "rule_id": 11,
+            "conditions": {
+                "cif_status": ACCOUNTS_VERIFICATION_STATUSES,
+                "app_check_status": ["PENDING", "FAILED"],
+            },
+            "response": _ACC_REVIEW,
+            "priority": 11,
+        },
+        {
+            # Matrix: verification statuses + INCOMPLETE -> Technology.
+            "rule_id": 12,
+            "conditions": {
+                "cif_status": ACCOUNTS_VERIFICATION_STATUSES,
+                "app_check_status": "INCOMPLETE",
+            },
+            "response": _ACC_REVIEW,
+            "priority": 12,
+        },
+    ]
+    return pd.DataFrame(rules)
+
 def _assert_cards_en_ar_pairs(rules: list) -> None:
     """Fail fast if a cards rule pairs refund EN with hold AR (or reverse)."""
     for rule in rules:
@@ -669,9 +857,12 @@ def match_rule(row, rules_df):
             elif isinstance(expected_value, str) and (
                 expected_value.startswith("%") or expected_value.endswith("%")
             ):
+                # SQL LIKE: % = any text. Escape each literal piece and join
+                # with ".*" (re.escape no longer escapes "%" on Python 3.7+,
+                # so the old escape-then-replace never produced a wildcard).
                 pattern = (
                     "^"
-                    + re.escape(expected_value).replace(r"\%", ".*")
+                    + ".*".join(re.escape(part) for part in expected_value.split("%"))
                     + "$"
                 )
                 text = "" if actual_value is None else str(actual_value)

@@ -20,6 +20,7 @@ from typing import Any
 
 from config import MTO_ROUTE_CASE1, MTO_ROUTE_CASE2
 from services.classifier import classify_product
+from services.rules import ACCOUNTS_ROUTE_BY_RULE
 
 ENGINE_MODEL = "tickets-engine"
 
@@ -47,6 +48,7 @@ CARDS_FLOW_ROUTE_PREFIX = {
 WAREHOUSE_TABLE = {
     "rmt": "remittance_baraq__transaction",
     "cards": "cards_transaction",
+    "accounts": "customer_identity_db.users",
 }
 
 WRITE_BACK_CANDIDATES = {
@@ -192,6 +194,8 @@ def _route_for(
         return f"{product}/{rule_id}"
     if product == "rmt":
         return RMT_ROUTE_BY_RULE.get(rid, f"remittance/RULE_{rid}")
+    if product == "accounts":
+        return ACCOUNTS_ROUTE_BY_RULE.get(rid, f"accounts/RULE_{rid}")
     return f"{product}/{rid}"
 
 
@@ -265,6 +269,13 @@ def _no_match_reason(ticket: dict[str, Any], txn: dict[str, Any], product: str |
         return "card_delivery_unhandled_or_missing_fields"
     if product == "rmt":
         return "rmt_no_static_rule_match"
+    if product == "accounts":
+        cif_status = str(txn.get("cif_status") or "").strip()
+        if not txn:
+            return "accounts_no_user_profile"
+        if not cif_status:
+            return "accounts_no_cif_status"
+        return "accounts_status_not_in_matrix"
     return "no_rule_matched"
 
 

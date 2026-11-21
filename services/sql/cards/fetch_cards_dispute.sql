@@ -9,7 +9,17 @@ WITH ticket_data AS (
         , u.first_name
         , u.first_name_en
     FROM polaris.`base.oci_crm_db`.all_service_requests t
-    LEFT JOIN polaris.`base.customer_identity_db`.users u
+    LEFT JOIN (
+        -- Pre-filter users to the ticket owner(s) for this transaction id. Same
+        -- join result as joining the whole table, without hashing all users.
+        SELECT uu.*
+        FROM polaris.`base.customer_identity_db`.users uu
+        WHERE TRIM(CAST(uu.user_id AS VARCHAR)) IN (
+            SELECT TRIM(CAST(tk.BaraqInternalID_c AS VARCHAR))
+            FROM polaris.`base.oci_crm_db`.all_service_requests tk
+            WHERE UPPER(TRIM(CAST(tk.TransactionID_c AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
+        )
+    ) u
         ON TRIM(CAST(u.user_id AS VARCHAR))
          = TRIM(CAST(t.BaraqInternalID_c AS VARCHAR))
     WHERE UPPER(TRIM(CAST(t.TransactionID_c AS VARCHAR)))
@@ -100,6 +110,7 @@ FROM ticket_data td
 JOIN polaris.`base.card_hub_payment_engine_db`.authorization_transaction at
     ON UPPER(TRIM(CAST(at.transaction_id AS VARCHAR)))
      = UPPER(TRIM(CAST(td.TransactionID_c AS VARCHAR)))
+    AND UPPER(TRIM(CAST(at.transaction_id AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))  -- implied by ticket_data filter; lets StarRocks filter the scan
     AND TRIM(CAST(at.cif AS VARCHAR))
      = TRIM(CAST(td.cif AS VARCHAR))
 

@@ -66,15 +66,36 @@ LEFT JOIN polaris.`base.remittance_baraq`.country_ir ci
     ON crdi.country = ci.id
 LEFT JOIN polaris.`base.remittance_baraq`.delivery_option_ir doi
     ON crdi.delivery_option = doi.id
-LEFT JOIN polaris.`base.customer_identity_db`.users u
+LEFT JOIN (
+    -- Pre-filter users to the ticket owner(s) for this transaction id. Same
+    -- join result as joining the whole table, without hashing all users.
+    SELECT uu.*
+    FROM polaris.`base.customer_identity_db`.users uu
+    WHERE TRIM(CAST(uu.user_id AS VARCHAR)) IN (
+        SELECT TRIM(CAST(tk.BaraqInternalID_c AS VARCHAR))
+        FROM polaris.`base.oci_crm_db`.all_service_requests tk
+        WHERE UPPER(TRIM(CAST(tk.TransactionID_c AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
+    )
+) u
     ON TRIM(CAST(u.user_id AS VARCHAR)) = TRIM(CAST(tcs.BaraqInternalID_c AS VARCHAR))
 -- Forced ownership check: resolve who actually owns this transaction's account
-INNER JOIN polaris.`base.customer_identity_db`.accounts owner_acct
+INNER JOIN (
+    -- Only the account(s) referenced by this transaction can match.
+    SELECT a.*
+    FROM polaris.`base.customer_identity_db`.accounts a
+    WHERE TRIM(CAST(a.account_no AS VARCHAR)) IN (
+        SELECT TRIM(CAST(tx.b_account_id AS VARCHAR))
+        FROM polaris.`base.remittance_baraq`.transaction tx
+        WHERE UPPER(TRIM(CAST(tx.reference_id AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
+    )
+) owner_acct
     ON TRIM(CAST(owner_acct.account_no AS VARCHAR)) = TRIM(CAST(t.b_account_id AS VARCHAR))
 INNER JOIN polaris.`base.customer_identity_db`.user_accounts_maps owner_map
     ON owner_map.account_id = owner_acct.id
 WHERE t.baraq_status != 'PRE_COMMIT'
   AND UPPER(TRIM(CAST(t.reference_id AS VARCHAR)))
       = UPPER(TRIM('@TransactionID_c'))
+  -- implied by the join above; lets StarRocks filter the tickets scan
+  AND UPPER(TRIM(CAST(tcs.TransactionID_c AS VARCHAR))) = UPPER(TRIM('@TransactionID_c'))
   -- Forced filter: the transaction's real owner must equal the ticket's own user
   AND TRIM(CAST(owner_map.user_id AS VARCHAR)) = TRIM(CAST(tcs.BaraqInternalID_c AS VARCHAR));

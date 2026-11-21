@@ -11,6 +11,7 @@ from services.classifier import classify_product
 from services.products.base import ProductEngine
 from services.products.cards import CardsEngine
 from services.products.remittance import RemittanceEngine
+from services.products.accounts import AccountsEngine
 from services.product_services import build_decision_response
 
 _REGISTRY: Dict[str, ProductEngine] = {}
@@ -59,6 +60,7 @@ def get_engine(product_key: str) -> ProductEngine:
 # extra line for a new product to be reachable.
 register_engine(CardsEngine())
 register_engine(RemittanceEngine())
+register_engine(AccountsEngine())
 
 
 def resolve_ticket(crm_request: dict) -> dict:
