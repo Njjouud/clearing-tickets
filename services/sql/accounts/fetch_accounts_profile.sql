@@ -21,20 +21,23 @@ WITH u AS (
     WHERE u.user_id = '@BaraqInternalID_c'
 ),
 
--- A user can have many application-check records: use the latest one
--- (ignoring soft-deleted records).
-latest_check AS (
+-- A user has many application-check records (one or more per check type,
+-- e.g. AML, FINSCAN, ADDRESS). Take the latest non-deleted record of EACH
+-- check type, then summarise:
+--   any FAILED      -> FAILED      (Compliance)
+--   else any PENDING    -> PENDING     (Compliance)
+--   else any INCOMPLETE -> INCOMPLETE  (Technology)
+--   all PASSED          -> PASSED
+--   anything else       -> OTHER       (matches no rule -> review)
+latest_check_per_type AS (
     SELECT *
     FROM (
         SELECT
               c.user_id
             , c.check_type
-            , c.status
-            , c.mode
-            , c.needs_user_input
-            , c.updated_at
+            , UPPER(TRIM(c.status)) AS status
             , ROW_NUMBER() OVER (
-                PARTITION BY c.user_id
+                PARTITION BY c.user_id, c.check_type
                 ORDER BY c.updated_at DESC, c.created_at DESC, c.id DESC
               ) AS rn
         FROM polaris.`base.customer_identity_db`.user_application_checks c
@@ -42,6 +45,22 @@ latest_check AS (
           AND c.deleted_at IS NULL
     ) x
     WHERE rn = 1
+),
+
+check_summary AS (
+    SELECT
+          user_id
+        , COUNT(*)                                              AS app_checks_total
+        , SUM(CASE WHEN status = 'PASSED'     THEN 1 ELSE 0 END) AS app_checks_passed
+        , SUM(CASE WHEN status = 'FAILED'     THEN 1 ELSE 0 END) AS app_checks_failed
+        , SUM(CASE WHEN status = 'PENDING'    THEN 1 ELSE 0 END) AS app_checks_pending
+        , SUM(CASE WHEN status = 'INCOMPLETE' THEN 1 ELSE 0 END) AS app_checks_incomplete
+        , GROUP_CONCAT(
+            CASE WHEN status <> 'PASSED' OR status IS NULL
+                 THEN CONCAT(check_type, ':', COALESCE(status, 'NULL')) END
+          ) AS app_checks_not_passed
+    FROM latest_check_per_type
+    GROUP BY user_id
 ),
 
 -- The customer's account: MAIN first, then the most recently updated.
@@ -105,11 +124,16 @@ SELECT
     , u.id_expiry_date_g
     , u.first_name
     , u.first_name_en
-    , lc.check_type        AS app_check_type
-    , lc.status            AS app_check_status
-    , lc.mode              AS app_check_mode
-    , lc.needs_user_input  AS app_check_needs_user_input
-    , lc.updated_at        AS app_check_updated_at
+    , CASE
+        WHEN cs.app_checks_total IS NULL               THEN NULL
+        WHEN cs.app_checks_failed > 0                  THEN 'FAILED'
+        WHEN cs.app_checks_pending > 0                 THEN 'PENDING'
+        WHEN cs.app_checks_incomplete > 0              THEN 'INCOMPLETE'
+        WHEN cs.app_checks_passed = cs.app_checks_total THEN 'PASSED'
+        ELSE 'OTHER'
+      END AS app_check_status
+    , cs.app_checks_total
+    , cs.app_checks_not_passed
     , ma.account_no
     , ma.account_status
     , ma.account_type
@@ -118,7 +142,7 @@ SELECT
     , COALESCE(bl.is_blocked_account, 0) AS is_blocked_account
     , COALESCE(mn.is_minor, 0)           AS is_minor
 FROM u
-LEFT JOIN latest_check lc ON lc.user_id = u.user_id
+LEFT JOIN check_summary cs ON cs.user_id = u.user_id
 LEFT JOIN main_account ma ON 1 = 1
 LEFT JOIN wallet wl       ON wl.account_no = ma.account_no
 LEFT JOIN blocked bl      ON bl.account_no = ma.account_no

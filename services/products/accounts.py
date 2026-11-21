@@ -33,6 +33,16 @@ def approval_band(balance) -> Optional[str]:
     return "REGULATORY_COMPLIANCE"
 
 
+def has_balance(balance) -> int:
+    """1 when there is a positive balance left to transfer."""
+    if balance is None or balance == "":
+        return 0
+    try:
+        return 1 if Decimal(str(balance)) > 0 else 0
+    except (InvalidOperation, ValueError):
+        return 0
+
+
 def normalize_cif_status(db_row: dict) -> Optional[str]:
     """Upper-cased cif_status. A user row with a blank/NULL cif_status (or no
     CIF) is 'NO_CIF'. No user row at all -> None (matches no rule)."""
@@ -98,9 +108,10 @@ class AccountsEngine(ProductEngine):
             "cif_status": normalize_cif_status(db_row),
             "cif_super_status": row_get(db_row, "cif_super_status"),
             "app_check_status": normalize_app_check(db_row),
-            "app_check_type": row_get(db_row, "app_check_type"),
+            "app_checks_not_passed": row_get(db_row, "app_checks_not_passed"),
             "account_status": (row_get(db_row, "account_status") or "").upper() or None,
             "wallet_balance": db_row.get("wallet_balance"),
+            "has_balance": has_balance(db_row.get("wallet_balance")),
             "approval_band": db_row.get("approval_band"),
             "is_blocked_account": as_flag(db_row.get("is_blocked_account"), 0),
             "is_minor": as_flag(db_row.get("is_minor"), 0),
