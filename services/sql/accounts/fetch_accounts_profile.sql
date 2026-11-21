@@ -36,6 +36,7 @@ latest_check_per_type AS (
               c.user_id
             , c.check_type
             , UPPER(TRIM(c.status)) AS status
+            , c.needs_user_input
             , ROW_NUMBER() OVER (
                 PARTITION BY c.user_id, c.check_type
                 ORDER BY c.updated_at DESC, c.created_at DESC, c.id DESC
@@ -59,6 +60,12 @@ check_summary AS (
             CASE WHEN status <> 'PASSED' OR status IS NULL
                  THEN CONCAT(check_type, ':', COALESCE(status, 'NULL')) END
           ) AS app_checks_not_passed
+        -- INCOMPLETE checks as CHECK_TYPE:needs_user_input, so the engine
+        -- can tell customer-completable checks from internal ones.
+        , GROUP_CONCAT(
+            CASE WHEN status = 'INCOMPLETE'
+                 THEN CONCAT(check_type, ':', CAST(COALESCE(needs_user_input, 0) AS VARCHAR)) END
+          ) AS app_checks_incomplete_list
     FROM latest_check_per_type
     GROUP BY user_id
 ),
@@ -134,6 +141,7 @@ SELECT
       END AS app_check_status
     , cs.app_checks_total
     , cs.app_checks_not_passed
+    , cs.app_checks_incomplete_list
     , ma.account_no
     , ma.account_status
     , ma.account_type
