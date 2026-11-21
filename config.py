@@ -1,6 +1,17 @@
 import os
 
 # ─────────────────────────────────────────────
+# CHANGES (clearing-tickets optimisation + accounts work)
+#   - PRODUCT_MAP: "account and registration" -> "accounts" (new product,
+#     handled by its own DAG: accounts_clearing_tickets.py).
+#   - NO_TRANSACTION_PRODUCTS: products keyed by User ID instead of
+#     TransactionID_c; the cards/rmt DAG skips them.
+#   - ACCOUNTS_* settings and SPRINKLR_ACCOUNTS (bottom of this file):
+#     configuration for the accounts DAG; Sprinklr stays off until its
+#     table and columns are filled in.
+# ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
 # PRODUCT MAP
 # Maps CRM CategoryLevel1_c values to internal product keys
 # ─────────────────────────────────────────────
@@ -80,9 +91,11 @@ MTO_EMAIL_BODY_INTRO = (
     "Kindly confirm the status of the transactions below:\n\n"
 )
 
-# Products whose tickets have no TransactionID_c: extracted by User ID
-# (BaraqInternalID_c) instead, and only when the DAG is triggered with
-# that product explicitly (product="" keeps the old cards + rmt run).
+# Products whose tickets have no TransactionID_c. They run in their own DAG
+# and are extracted by User ID (BaraqInternalID_c):
+#   accounts -> accounts_clearing_tickets.py (clearing_backlog_accounts)
+# The cards/rmt DAG (bulk_clearing_tickets.py) leaves them out of
+# product="" and rejects product="accounts".
 NO_TRANSACTION_PRODUCTS = ("accounts",)
 
 TICKETS_TABLE = "polaris.`base.oci_crm_db`.all_service_requests"

@@ -60,7 +60,7 @@ def get_engine(product_key: str) -> ProductEngine:
 # extra line for a new product to be reachable.
 register_engine(CardsEngine())
 register_engine(RemittanceEngine())
-register_engine(AccountsEngine())
+register_engine(AccountsEngine())  # Account & Registration (accounts DAG)
 
 
 def resolve_ticket(crm_request: dict) -> dict:
